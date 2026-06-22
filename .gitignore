@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files (keep structure, ignore contents)
+data/raw/*
+data/interim/*
+data/processed/*
+!data/**/.gitkeep
+
+# Model checkpoints (often huge)
+models/*
+!models/.gitkeep
+
+# Reports figures (regenerate from notebooks)
+reports/figures/*
+!reports/figures/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / env vars
+.env
+*.key
