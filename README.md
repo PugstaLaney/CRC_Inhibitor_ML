@@ -15,6 +15,7 @@ Four major CRC oncogene drivers from the ChEMBL 37 bioactivity database:
 
 ## Documentation
 
+- **[docs/writeup.md](docs/writeup.md)** — full project writeup: problem framing, data + EDA story, architecture progression (RF → GIN → GINE → multi-target ESM-2), results, SAR interpretation, deployment story, limitations. Read this if you want the full narrative.
 - **[docs/chembl-cheatsheet.md](docs/chembl-cheatsheet.md)** — the 5 ChEMBL tables that matter for bioactivity work, canonical query template, common variations, filter value reference, quick exploration commands. The one file to open when you need to write a ChEMBL query.
 
 ## Project structure
@@ -135,7 +136,7 @@ The CLI is a thin wrapper around three reusable modules: [src/data/featurize.py]
 | 3.5 — GINE + three-way scaffold split | Done | Val→test gap closed; absolute scores still trail RF |
 | 4 — Multi-target ESM-2 + GINE | Done | Closed most of gap to RF; zero-shot target generalization |
 | 5 — CLI tool (`predict.py`) | Done | Score any SMILES library against any ChEMBL / UniProt target |
-| 6 — SAR interpretation + writeup | Next | Attention heatmaps, counterfactuals, portfolio writeup |
+| 6 — SAR interpretation + writeup | Done | Gradient-attribution heatmaps + `docs/writeup.md` |
 
 ## Why this project
 

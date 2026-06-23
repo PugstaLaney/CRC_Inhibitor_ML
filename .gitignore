@@ -45,3 +45,7 @@ desktop.ini
 
 # Claude working context (machine-specific, contains absolute paths)
 CLAUDE.md
+
+# CLI output CSVs at project root (regenerable from predict.py)
+/predictions.csv
+/*_preds.csv
