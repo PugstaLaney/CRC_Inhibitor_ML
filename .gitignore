@@ -42,3 +42,6 @@ desktop.ini
 # Secrets / env vars
 .env
 *.key
+
+# Claude working context (machine-specific, contains absolute paths)
+CLAUDE.md

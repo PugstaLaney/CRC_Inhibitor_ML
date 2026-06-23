@@ -13,6 +13,10 @@ Four major CRC oncogene drivers from the ChEMBL 37 bioactivity database:
 | **EGFR** | CHEMBL203 | Target of cetuximab and panitumumab |
 | **PIK3CA** | CHEMBL4005 | Frequently mutated; downstream of EGFR |
 
+## Documentation
+
+- **[docs/chembl-cheatsheet.md](docs/chembl-cheatsheet.md)** — the 5 ChEMBL tables that matter for bioactivity work, canonical query template, common variations, filter value reference, quick exploration commands. The one file to open when you need to write a ChEMBL query.
+
 ## Project structure
 
 ```
@@ -22,8 +26,11 @@ CRC_Inhibitor_ML/
 │   ├── raw/                      ChEMBL extracts + .db symlink (gitignored)
 │   ├── interim/                  Standardized SMILES + harmonized pIC50 (gitignored)
 │   └── processed/                Featurized graphs, train/val/test splits (gitignored)
+├── docs/
+│   └── chembl-cheatsheet.md      Working reference for ChEMBL queries
 ├── notebooks/
-│   └── 00_chembl_setup_and_eda.ipynb   Phase 0: data pull + EDA
+│   ├── 00_chembl_setup_and_eda.ipynb   Phase 0: data pull + EDA
+│   └── 01_curate.ipynb                 Phase 1: cleanup + standardization
 ├── src/
 │   ├── data/                     Downloaders, cleaners, featurizers
 │   ├── models/                   GNN architectures, ESM-2 wrappers
