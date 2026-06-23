@@ -25,19 +25,27 @@ CRC_Inhibitor_ML/
 │   ├── chembl_37_schema.pdf      ChEMBL ER diagram (reference)
 │   ├── raw/                      ChEMBL extracts + .db symlink (gitignored)
 │   ├── interim/                  Standardized SMILES + harmonized pIC50 (gitignored)
-│   └── processed/                Featurized graphs, train/val/test splits (gitignored)
+│   └── processed/                ESM-2 embeddings, featurized graphs (gitignored)
 ├── docs/
 │   └── chembl-cheatsheet.md      Working reference for ChEMBL queries
+├── examples/
+│   └── sample_smiles.smi         Demo SMILES library for predict.py
 ├── notebooks/
 │   ├── 00_chembl_setup_and_eda.ipynb   Phase 0: data pull + EDA
-│   └── 01_curate.ipynb                 Phase 1: cleanup + standardization
+│   ├── 01_curate.ipynb                 Phase 1: cleanup + standardization
+│   ├── 02_baseline_rf.ipynb            Phase 2: random forest baseline
+│   ├── 03_gnn_single_target.ipynb      Phase 3: single-target GIN
+│   ├── 03b_gnn_v2_fixed_split.ipynb    Phase 3.5: GINE + scaffold-val
+│   └── 04_multi_target_esm2.ipynb      Phase 4: multi-target ESM-2 + GINE
 ├── src/
-│   ├── data/                     Downloaders, cleaners, featurizers
-│   ├── models/                   GNN architectures, ESM-2 wrappers
-│   ├── training/                 Train loops, eval metrics
-│   └── utils/
+│   ├── data/
+│   │   ├── featurize.py          SMILES → PyG molecular graphs
+│   │   └── proteins.py           UniProt lookup + ESM-2 embedding
+│   └── models/
+│       └── gine.py               MultiModalGINE architecture + checkpoint loader
+├── predict.py                    Phase 5 CLI: score molecules against any target
 ├── models/                       Trained checkpoints (gitignored)
-├── reports/figures/              Generated plots (gitignored)
+├── reports/                      Per-phase metrics JSON
 ├── configs/                      YAML hyperparameter configs
 ├── tests/
 ├── .gitignore
@@ -84,19 +92,50 @@ Extract to any non-OneDrive location (the project assumes `E:\ml_data\chembl\che
 
 ## Running
 
-Open `notebooks/00_chembl_setup_and_eda.ipynb`, select the `CRC_Inhibitor_ML` venv as the kernel, run cells top to bottom. Output: `data/raw/chembl_crc_targets_raw.csv` — the input to Phase 1.
+### Running the notebooks (Phases 0–4)
+
+Open the notebooks in order (`00_…` through `04_…`), select the `CRC_Inhibitor_ML` venv as the kernel, run cells top to bottom. Each phase produces inputs for the next:
+
+- `00_chembl_setup_and_eda.ipynb` → `data/raw/chembl_crc_targets_raw.csv`
+- `01_curate.ipynb` → `data/interim/chembl_crc_targets_clean.csv`
+- `02_baseline_rf.ipynb` → `reports/baseline_rf_metrics.json`
+- `03_gnn_single_target.ipynb` → per-target GIN checkpoints + metrics
+- `03b_gnn_v2_fixed_split.ipynb` → per-target GINE checkpoints + metrics
+- `04_multi_target_esm2.ipynb` → `models/gine_esm2_multi_target.pt` + `reports/phase4_multi_target_metrics.json`
+
+### Predicting against any target (Phase 5 — the CLI tool)
+
+The Phase 4 multi-target model can score molecule libraries against any target — including targets the model wasn't explicitly trained on, by feeding in the target's amino acid sequence via ESM-2 embedding.
+
+```powershell
+python predict.py `
+    --target  CHEMBL203 `
+    --smiles  examples/sample_smiles.smi `
+    --output  predictions.csv
+```
+
+Arguments:
+
+- `--target` — ChEMBL target ID (e.g. `CHEMBL203` for EGFR) **or** UniProt accession (e.g. `P00533` for EGFR). The script resolves ChEMBL IDs via the bundled mapping file, fetches the protein sequence from UniProt, and embeds it with ESM-2 (cached after first use).
+- `--smiles` — text file with one SMILES per line. Lines starting with `#` are comments; an optional second whitespace-separated column is treated as a molecule name (ignored for scoring).
+- `--output` — destination CSV with columns `smiles, predicted_pic50`, sorted by predicted potency (highest pIC50 first).
+
+Output preview is printed to stdout (top 10 by default; configurable via `--top-k`).
+
+The CLI is a thin wrapper around three reusable modules: [src/data/featurize.py](src/data/featurize.py), [src/data/proteins.py](src/data/proteins.py), [src/models/gine.py](src/models/gine.py).
 
 ## Roadmap
 
 | Phase | Status | Output |
 |---|---|---|
-| 0 — Env setup + ChEMBL extraction | In progress | Raw labeled CSV |
-| 1 — SMILES standardization + pIC50 harmonization | Planned | Curated CSV |
-| 2 — Random-forest-on-fingerprints baseline | Planned | Baseline metrics |
-| 3 — Single-target GNN (PyG) | Planned | Per-target trained models |
-| 4 — Multi-target ESM-2 + GNN | Planned | Multi-modal model |
-| 5 — CLI tool refactor | Planned | `python -m crc_inhibitor_ml.pipeline --target <ID>` |
-| 6 — SAR interpretation + writeup | Planned | Attention heatmaps, counterfactuals, portfolio writeup |
+| 0 — Env setup + ChEMBL extraction | Done | 41,343-row raw labeled CSV |
+| 1 — SMILES standardization + pIC50 harmonization | Done | 25,170-row curated CSV |
+| 2 — Random-forest-on-fingerprints baseline | Done | Scaffold-split R² 0.45–0.61 across targets |
+| 3 — Single-target GIN | Done | Underperformed baseline; diagnosed val-split bug |
+| 3.5 — GINE + three-way scaffold split | Done | Val→test gap closed; absolute scores still trail RF |
+| 4 — Multi-target ESM-2 + GINE | Done | Closed most of gap to RF; zero-shot target generalization |
+| 5 — CLI tool (`predict.py`) | Done | Score any SMILES library against any ChEMBL / UniProt target |
+| 6 — SAR interpretation + writeup | Next | Attention heatmaps, counterfactuals, portfolio writeup |
 
 ## Why this project
 
