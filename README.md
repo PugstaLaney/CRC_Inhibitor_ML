@@ -45,6 +45,7 @@ CRC_Inhibitor_ML/
 │   └── models/
 │       └── gine.py               MultiModalGINE architecture + checkpoint loader
 ├── predict.py                    Phase 5 CLI: score molecules against any target
+├── app.py                        Phase 7 Streamlit web UI (the same model with a browser UI)
 ├── models/                       Trained checkpoints (gitignored)
 ├── reports/                      Per-phase metrics JSON
 ├── configs/                      YAML hyperparameter configs
@@ -104,6 +105,25 @@ Open the notebooks in order (`00_…` through `04_…`), select the `CRC_Inhibit
 - `03b_gnn_v2_fixed_split.ipynb` → per-target GINE checkpoints + metrics
 - `04_multi_target_esm2.ipynb` → `models/gine_esm2_multi_target.pt` + `reports/phase4_multi_target_metrics.json`
 
+### Web UI (Phase 7 — `app.py`)
+
+A Streamlit web app that wraps the Phase 4 model with a browser-based interface. Aimed at medicinal chemists / pharma users who don't want to live in the terminal.
+
+```powershell
+streamlit run app.py
+```
+
+Opens at http://localhost:8501. Features:
+
+- **Target picker** — preset CRC targets (KRAS, BRAF, EGFR, PIK3CA) OR any ChEMBL ID / UniProt accession (handles novel targets via the ESM-2 pathway)
+- **SMILES input** — paste text or upload `.smi`/`.csv`, with a one-click sample library
+- **Target protein 3D viewer** — AlphaFold-predicted structure shown above results, with tabs for cartoon-by-pLDDT and full atomic-detail residue views
+- **Ranked results table** — sortable, with downloadable CSV
+- **Distribution histogram** of predicted pIC50 across the input library
+- **Top-K molecules as interactive 3D viewers** — RDKit-embedded conformers, click and drag to rotate
+
+Requires the Phase 4 model checkpoint (`models/gine_esm2_multi_target.pt`) to exist — run notebook `04_multi_target_esm2.ipynb` first if you haven't.
+
 ### Predicting against any target (Phase 5 — the CLI tool)
 
 The Phase 4 multi-target model can score molecule libraries against any target — including targets the model wasn't explicitly trained on, by feeding in the target's amino acid sequence via ESM-2 embedding.
@@ -137,6 +157,7 @@ The CLI is a thin wrapper around three reusable modules: [src/data/featurize.py]
 | 4 — Multi-target ESM-2 + GINE | Done | Closed most of gap to RF; zero-shot target generalization |
 | 5 — CLI tool (`predict.py`) | Done | Score any SMILES library against any ChEMBL / UniProt target |
 | 6 — SAR interpretation + writeup | Done | Gradient-attribution heatmaps + `docs/writeup.md` |
+| 7 — Streamlit web UI | Done | `app.py` — browser interface with target picker, 3D molecule + protein viewers, ranked results, CSV export |
 
 ## Why this project
 
