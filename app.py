@@ -29,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from rdkit import Chem, RDLogger  # noqa: E402
-from rdkit.Chem import AllChem, Draw  # noqa: E402
+from rdkit.Chem import AllChem, Descriptors, Draw, Lipinski, QED  # noqa: E402
 from torch_geometric.loader import DataLoader as PyGDataLoader  # noqa: E402
 
 from src.data.featurize import smiles_to_pyg  # noqa: E402
@@ -43,9 +43,19 @@ RDLogger.DisableLog("rdApp.*")
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-MODEL_PATH    = PROJECT_ROOT / "models"             / "gine_esm2_multi_target.pt"
-MAPPING_PATH  = PROJECT_ROOT / "data" / "raw"       / "chembl_uniprot_mapping.txt"
-EMB_CACHE     = PROJECT_ROOT / "data" / "processed" / "target_esm2_embeddings.pt"
+MODEL_PATH         = PROJECT_ROOT / "models"             / "gine_esm2_multi_target.pt"
+MAPPING_PATH       = PROJECT_ROOT / "data" / "raw"       / "chembl_uniprot_mapping.txt"
+EMB_CACHE          = PROJECT_ROOT / "data" / "processed" / "target_esm2_embeddings.pt"
+CLEAN_CSV          = PROJECT_ROOT / "data" / "interim"   / "chembl_crc_targets_clean.csv"
+DESCRIPTORS_CACHE  = PROJECT_ROOT / "data" / "processed" / "molecule_descriptors.parquet"
+
+# Short names for the four trained targets, used by the Browse tab filter
+TARGET_SHORT_NAMES = {
+    "CHEMBL2189121": "KRAS",
+    "CHEMBL5145":    "BRAF",
+    "CHEMBL203":     "EGFR",
+    "CHEMBL4005":    "PIK3CA",
+}
 
 PRESET_TARGETS = {
     "KRAS — GTPase KRas (CRC, mutated in ~40%)":              "CHEMBL2189121",
@@ -123,6 +133,65 @@ def _fetch_alphafold_pdb(uniprot_accession: str) -> str:
         raise ValueError(f"No AlphaFold prediction for {uniprot_accession}")
     pdb_url = metadata[0]["pdbUrl"]
     return requests.get(pdb_url, timeout=60).text
+
+
+def _compute_descriptors_for_smiles(smiles_list: list[str]) -> pd.DataFrame:
+    """Compute molecular descriptors for a list of unique SMILES (with a progress bar)."""
+    rows = []
+    progress = st.progress(0.0, text="Computing molecular descriptors (one-time, takes ~30 sec)...")
+    n = len(smiles_list)
+    for i, smi in enumerate(smiles_list):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            continue
+        try:
+            rows.append({
+                "canonical_smiles_std": smi,
+                "mw":              float(Descriptors.MolWt(mol)),
+                "logp":            float(Descriptors.MolLogP(mol)),
+                "hbd":             int(Lipinski.NumHDonors(mol)),
+                "hba":             int(Lipinski.NumHAcceptors(mol)),
+                "rotatable_bonds": int(Lipinski.NumRotatableBonds(mol)),
+                "tpsa":            float(Descriptors.TPSA(mol)),
+                "qed":             float(QED.qed(mol)),
+                "n_heavy_atoms":   int(Descriptors.HeavyAtomCount(mol)),
+            })
+        except Exception:
+            continue
+        if i % 500 == 0:
+            progress.progress(i / n, text=f"Computing descriptors... {i:,} / {n:,}")
+    progress.empty()
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def load_browse_dataset() -> Optional[pd.DataFrame]:
+    """Load the curated dataset + molecular descriptors. Cached to parquet on first call."""
+    if not CLEAN_CSV.exists():
+        return None
+    df = pd.read_csv(CLEAN_CSV)
+
+    # Compute descriptors if not cached
+    if DESCRIPTORS_CACHE.exists():
+        descriptors = pd.read_parquet(DESCRIPTORS_CACHE)
+    else:
+        unique_smiles = df["canonical_smiles_std"].dropna().unique().tolist()
+        descriptors = _compute_descriptors_for_smiles(unique_smiles)
+        DESCRIPTORS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        descriptors.to_parquet(DESCRIPTORS_CACHE, index=False)
+
+    df = df.merge(descriptors, on="canonical_smiles_std", how="left")
+    df["target_short"] = (
+        df["target_chembl_id"].map(TARGET_SHORT_NAMES).fillna(df["target_chembl_id"])
+    )
+    # Reorder columns
+    cols = [
+        "target_short", "target_chembl_id", "pic50", "pic50_std", "n_measurements",
+        "canonical_smiles_std",
+        "mw", "logp", "hbd", "hba", "rotatable_bonds", "tpsa", "qed", "n_heavy_atoms",
+    ]
+    cols = [c for c in cols if c in df.columns]
+    return df[cols]
 
 
 # -----------------------------------------------------------------------------
@@ -272,11 +341,14 @@ with st.sidebar:
     )
 
 # -----------------------------------------------------------------------------
-# Main area
+# Main area — Predict + Browse Dataset tabs
 # -----------------------------------------------------------------------------
-col_in, col_out = st.columns([2, 3])
+tab_predict, tab_browse = st.tabs(["🧬 Predict", "📚 Browse Dataset"])
 
-with col_in:
+with tab_predict:
+  col_in, col_out = st.columns([2, 3])
+
+  with col_in:
     st.subheader("Input molecules")
     input_mode = st.radio("How to provide SMILES", ["Paste", "Upload file"], horizontal=True)
 
@@ -304,7 +376,7 @@ with col_in:
 
     predict = st.button("🧬 Predict", type="primary", use_container_width=True)
 
-with col_out:
+  with col_out:
     if predict:
         smiles_pairs = parse_smiles_text(smiles_text)
         if not smiles_pairs:
@@ -406,4 +478,157 @@ with col_out:
                         if mol is not None:
                             st.image(Draw.MolToImage(mol, size=(280, 220)), use_container_width=True)
     else:
-        st.info("👈 Enter target + SMILES in the left panel, then click **Predict** to run.")
+      st.info("👈 Enter target + SMILES in the left panel, then click **Predict** to run.")
+
+
+# =============================================================================
+# Browse Dataset tab — searchable / filterable library of 25,170 curated rows
+# =============================================================================
+with tab_browse:
+  st.subheader("Browse curated ChEMBL dataset")
+  st.caption(
+      "25,170 high-confidence (target, molecule) measurements after Phase 1 curation. "
+      "Filter by target, potency, and drug-likeness properties. "
+      "Select rows and send them to the Predict tab to score with the model."
+  )
+
+  browse_df = load_browse_dataset()
+  if browse_df is None:
+      st.error(
+          f"Curated dataset not found at `{CLEAN_CSV.relative_to(PROJECT_ROOT)}`. "
+          f"Run `notebooks/01_curate.ipynb` first."
+      )
+      st.stop()
+
+  # -------- Filters --------
+  filt_col, table_col = st.columns([1, 3])
+
+  with filt_col:
+      st.markdown("**Filters**")
+      target_choices = sorted(browse_df["target_short"].unique().tolist())
+      selected_targets = st.multiselect(
+          "Targets", target_choices, default=target_choices,
+      )
+
+      pic50_min, pic50_max = float(browse_df["pic50"].min()), float(browse_df["pic50"].max())
+      pic50_range = st.slider(
+          "pIC50 range", pic50_min, pic50_max, (pic50_min, pic50_max),
+          step=0.1,
+          help="Higher pIC50 = more potent inhibitor. 7 = 100 nM, 8 = 10 nM, 9 = 1 nM.",
+      )
+
+      mw_range = st.slider("MW range (Da)", 50.0, 1500.0, (100.0, 700.0), step=10.0)
+      logp_range = st.slider(
+          "LogP range", -5.0, 12.0, (-2.0, 7.0), step=0.5,
+          help="Octanol-water partition. Negative = hydrophilic, positive = lipophilic. Lipinski limit is ≤ 5.",
+      )
+
+      qed_min = st.slider(
+          "Min QED (drug-likeness)", 0.0, 1.0, 0.0, step=0.05,
+          help="Quantitative Estimate of Drug-likeness. 0 = poor, 1 = ideal drug-like profile.",
+      )
+
+      lipinski_only = st.checkbox(
+          "Lipinski compliant only",
+          value=False,
+          help="MW ≤ 500, LogP ≤ 5, HBD ≤ 5, HBA ≤ 10. The classic 'orally bioavailable drug' filter.",
+      )
+
+      search_text = st.text_input(
+          "SMILES contains",
+          value="",
+          placeholder="e.g. c1ccccc1 for benzene",
+          help="Substring match against the canonical SMILES string. Case insensitive.",
+      )
+
+  # -------- Apply filters --------
+  filtered = browse_df[
+      browse_df["target_short"].isin(selected_targets)
+      & browse_df["pic50"].between(*pic50_range)
+      & browse_df["mw"].between(*mw_range)
+      & browse_df["logp"].between(*logp_range)
+      & (browse_df["qed"] >= qed_min)
+  ]
+
+  if lipinski_only:
+      filtered = filtered[
+          (filtered["mw"] <= 500)
+          & (filtered["logp"] <= 5)
+          & (filtered["hbd"] <= 5)
+          & (filtered["hba"] <= 10)
+      ]
+
+  if search_text.strip():
+      filtered = filtered[
+          filtered["canonical_smiles_std"].str.contains(
+              search_text.strip(), case=False, regex=False, na=False
+          )
+      ]
+
+  with table_col:
+      st.markdown(f"**{len(filtered):,} molecules** match filters  •  "
+                  f"sorted by predicted pIC50 (descending). "
+                  f"Click row checkboxes to select.")
+
+      # Sort descending by pIC50 by default
+      filtered_sorted = filtered.sort_values("pic50", ascending=False).reset_index(drop=True)
+
+      # Format for display: round floats
+      display_df = filtered_sorted.copy()
+      for col in ["mw", "logp", "tpsa", "qed", "pic50", "pic50_std"]:
+          if col in display_df.columns:
+              display_df[col] = display_df[col].round(2)
+
+      event = st.dataframe(
+          display_df,
+          use_container_width=True,
+          height=500,
+          hide_index=True,
+          on_select="rerun",
+          selection_mode="multi-row",
+          key="browse_table",
+      )
+
+      # -------- Selection actions --------
+      selected_idx = event.selection.rows if hasattr(event, "selection") else []
+      selected_count = len(selected_idx)
+
+      col_a, col_b, col_c = st.columns([1, 1, 2])
+
+      with col_a:
+          if st.button(
+              f"🧬 Send {selected_count} to Predict",
+              disabled=(selected_count == 0),
+              use_container_width=True,
+          ):
+              picked = filtered_sorted.iloc[selected_idx]
+              lines = [
+                  f"{smi}\t{tgt}_pIC50={pic:.2f}"
+                  for smi, tgt, pic in zip(
+                      picked["canonical_smiles_std"],
+                      picked["target_short"],
+                      picked["pic50"],
+                  )
+              ]
+              st.session_state["smiles_textarea"] = "\n".join(lines)
+              st.success(
+                  f"Sent {selected_count} molecules to the Predict tab. "
+                  f"Switch tabs to see them and click Predict."
+              )
+
+      with col_b:
+          csv_bytes = filtered_sorted.to_csv(index=False).encode("utf-8")
+          st.download_button(
+              "📥 Download CSV",
+              data=csv_bytes,
+              file_name="browse_filtered.csv",
+              mime="text/csv",
+              use_container_width=True,
+          )
+
+      with col_c:
+          if selected_count > 0:
+              st.caption(
+                  f"Selected {selected_count} row(s). The 'Send' button will overwrite "
+                  f"the Predict tab's SMILES input with these molecules."
+              )
