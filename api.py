@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem, Draw
+from rdkit.Chem import AllChem, Descriptors, Draw, Lipinski, QED
 
 # Project setup so `from src...` works
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -105,6 +105,33 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+def _compute_mol_properties(smi: str) -> Optional[dict]:
+    """Compute Lipinski / drug-likeness descriptors for a SMILES. Returns None if unparseable."""
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None:
+        return None
+    try:
+        mw = float(Descriptors.MolWt(mol))
+        logp = float(Descriptors.MolLogP(mol))
+        hbd = int(Lipinski.NumHDonors(mol))
+        hba = int(Lipinski.NumHAcceptors(mol))
+        violations = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
+        return {
+            "mw":              round(mw, 1),
+            "logp":            round(logp, 2),
+            "hbd":             hbd,
+            "hba":             hba,
+            "rotatable_bonds": int(Lipinski.NumRotatableBonds(mol)),
+            "tpsa":            round(float(Descriptors.TPSA(mol)), 1),
+            "qed":             round(float(QED.qed(mol)), 3),
+            "n_heavy_atoms":   int(Descriptors.HeavyAtomCount(mol)),
+            "lipinski_violations": violations,
+            "lipinski_pass":   violations == 0,
+        }
+    except Exception:
+        return None
+
+
 def _resolve_target_to_embedding(target_id: str) -> torch.Tensor:
     cache = _state["target_emb_cache"]
     if target_id in cache:
@@ -309,14 +336,20 @@ def get_molecules_for_indication(name: str, limit: int = Query(500, ge=1, le=500
     cache_key = f"{name}:{limit}"
     if cache_key not in _molecules_by_indication:
         with _chembl_conn() as con:
+            # Also pull the comma-joined list of target chembl_ids each drug acts on
+            # (via drug_mechanism). LEFT JOIN so drugs with no recorded mechanism
+            # still appear in the list; they just have an empty target list.
             cur = con.execute("""
                 SELECT md.chembl_id,
                        md.pref_name,
                        cs.canonical_smiles,
-                       MAX(COALESCE(di.max_phase_for_ind, -1)) AS max_phase
+                       MAX(COALESCE(di.max_phase_for_ind, -1)) AS max_phase,
+                       GROUP_CONCAT(DISTINCT td.chembl_id)     AS target_chembl_ids
                 FROM drug_indication      di
                 JOIN molecule_dictionary  md ON di.molregno = md.molregno
                 JOIN compound_structures  cs ON md.molregno = cs.molregno
+                LEFT JOIN drug_mechanism  dm ON md.molregno = dm.molregno
+                LEFT JOIN target_dictionary td ON dm.tid    = td.tid
                 WHERE di.mesh_heading      = ?
                   AND md.molecule_type     = 'Small molecule'
                   AND cs.canonical_smiles IS NOT NULL
@@ -326,10 +359,13 @@ def get_molecules_for_indication(name: str, limit: int = Query(500, ge=1, le=500
             """, (name, limit))
             _molecules_by_indication[cache_key] = [
                 {
-                    "chembl_id": row[0],
-                    "name":      row[1] or "",
-                    "smiles":    row[2],
-                    "max_phase": None if row[3] == -1 else int(row[3]),
+                    "chembl_id":          row[0],
+                    "name":               row[1] or "",
+                    "smiles":             row[2],
+                    "max_phase":          None if row[3] == -1 else int(row[3]),
+                    # Split the GROUP_CONCAT into a real array. None if no
+                    # mechanism recorded for any of this drug's actions.
+                    "target_chembl_ids":  row[4].split(",") if row[4] else [],
                 }
                 for row in cur.fetchall()
             ]
@@ -374,9 +410,17 @@ def predict(req: PredictRequest):
             preds_arr.append(model(batch).cpu().numpy())
     preds = np.concatenate(preds_arr)
 
-    # Sort descending by predicted pIC50
+    # Build predictions with computed molecular properties for each.
+    # Property computation is RDKit (no model), takes <1ms per molecule.
     predictions = sorted(
-        [{"smiles": s, "predicted_pic50": float(p)} for s, p in zip(keep_smiles, preds)],
+        [
+            {
+                "smiles":          s,
+                "predicted_pic50": float(p),
+                "properties":      _compute_mol_properties(s),
+            }
+            for s, p in zip(keep_smiles, preds)
+        ],
         key=lambda x: x["predicted_pic50"],
         reverse=True,
     )
