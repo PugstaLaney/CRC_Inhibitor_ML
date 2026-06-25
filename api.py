@@ -17,6 +17,7 @@ CORS is wide-open (`allow_origins=["*"]`) for local dev. Tighten for production.
 from __future__ import annotations
 
 import io
+import sqlite3
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -52,6 +53,7 @@ RDLogger.DisableLog("rdApp.*")
 MODEL_PATH    = PROJECT_ROOT / "models"             / "gine_esm2_multi_target.pt"
 MAPPING_PATH  = PROJECT_ROOT / "data" / "raw"       / "chembl_uniprot_mapping.txt"
 EMB_CACHE     = PROJECT_ROOT / "data" / "processed" / "target_esm2_embeddings.pt"
+CHEMBL_DB     = Path(r"E:\ml_data\chembl\chembl_37\chembl_37_sqlite\chembl_37.db")
 
 TARGET_PRESETS = {
     "CHEMBL2189121": {"chembl_id": "CHEMBL2189121", "short": "KRAS",
@@ -91,7 +93,7 @@ async def lifespan(app: FastAPI):
     # No teardown needed
 
 
-app = FastAPI(title="CRC Inhibitor ML API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="IC50 Predictor API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # tighten for production
@@ -219,6 +221,119 @@ def get_molecule_png(smi: str = Query(..., min_length=1), size: int = Query(300,
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+# =============================================================================
+# ChEMBL indication / target / molecule browsing endpoints
+# =============================================================================
+_indications_cache: Optional[list] = None
+_targets_by_indication: dict[str, list] = {}
+_molecules_by_indication: dict[str, list] = {}
+
+
+def _chembl_conn():
+    """Open a fresh SQLite connection to ChEMBL. SQLite is single-file, no pool needed."""
+    if not CHEMBL_DB.exists():
+        raise HTTPException(503, f"ChEMBL database not found at {CHEMBL_DB}")
+    return sqlite3.connect(str(CHEMBL_DB))
+
+
+@app.get("/indications")
+def list_indications():
+    """All distinct MeSH disease indications in ChEMBL, sorted by drug count.
+
+    Cached after first call (the answer is stable across the lifetime of one
+    ChEMBL release). About 1,500–3,000 distinct indications expected.
+    """
+    global _indications_cache
+    if _indications_cache is None:
+        with _chembl_conn() as con:
+            cur = con.execute("""
+                SELECT mesh_heading, COUNT(DISTINCT molregno) AS n_drugs
+                FROM drug_indication
+                WHERE mesh_heading IS NOT NULL
+                GROUP BY mesh_heading
+                ORDER BY n_drugs DESC, mesh_heading ASC
+            """)
+            _indications_cache = [
+                {"name": row[0], "n_drugs": int(row[1])}
+                for row in cur.fetchall()
+            ]
+    return {"indications": _indications_cache, "count": len(_indications_cache)}
+
+
+@app.get("/indications/{name}/targets")
+def get_targets_for_indication(name: str):
+    """Protein targets known to be acted upon by drugs for this indication.
+
+    Walks: drug_indication → mechanism (drug-target action) → target_dictionary.
+    Filtered to human single proteins, protein complexes, or protein families
+    (skip non-protein targets like cell lines, organisms, RNA, etc.).
+    """
+    if name not in _targets_by_indication:
+        with _chembl_conn() as con:
+            cur = con.execute("""
+                SELECT td.chembl_id, td.pref_name, td.target_type, td.organism,
+                       COUNT(DISTINCT m.molregno) AS n_drugs
+                FROM drug_indication di
+                JOIN mechanism        m  ON di.molregno = m.molregno
+                JOIN target_dictionary td ON m.tid       = td.tid
+                WHERE di.mesh_heading = ?
+                  AND td.target_type IN ('SINGLE PROTEIN', 'PROTEIN COMPLEX', 'PROTEIN FAMILY')
+                  AND td.organism    = 'Homo sapiens'
+                GROUP BY td.tid
+                ORDER BY n_drugs DESC, td.pref_name ASC
+            """, (name,))
+            _targets_by_indication[name] = [
+                {
+                    "chembl_id": row[0],
+                    "name":      row[1],
+                    "type":      row[2],
+                    "organism":  row[3],
+                    "n_drugs":   int(row[4]),
+                }
+                for row in cur.fetchall()
+            ]
+    return {"indication": name, "targets": _targets_by_indication[name]}
+
+
+@app.get("/indications/{name}/molecules")
+def get_molecules_for_indication(name: str, limit: int = Query(500, ge=1, le=5000)):
+    """Small-molecule drugs known for this indication, with SMILES and clinical phase.
+
+    Walks: drug_indication → molecule_dictionary → compound_structures.
+    Filtered to small molecules with non-null canonical SMILES (so they can be
+    fed back into the predictor). Sorted by max clinical phase descending,
+    then by name. Hard-capped at 5,000 rows.
+    """
+    cache_key = f"{name}:{limit}"
+    if cache_key not in _molecules_by_indication:
+        with _chembl_conn() as con:
+            cur = con.execute("""
+                SELECT md.chembl_id,
+                       md.pref_name,
+                       cs.canonical_smiles,
+                       MAX(COALESCE(di.max_phase_for_ind, -1)) AS max_phase
+                FROM drug_indication      di
+                JOIN molecule_dictionary  md ON di.molregno = md.molregno
+                JOIN compound_structures  cs ON md.molregno = cs.molregno
+                WHERE di.mesh_heading      = ?
+                  AND md.molecule_type     = 'Small molecule'
+                  AND cs.canonical_smiles IS NOT NULL
+                GROUP BY md.molregno
+                ORDER BY max_phase DESC, md.pref_name ASC
+                LIMIT ?
+            """, (name, limit))
+            _molecules_by_indication[cache_key] = [
+                {
+                    "chembl_id": row[0],
+                    "name":      row[1] or "",
+                    "smiles":    row[2],
+                    "max_phase": None if row[3] == -1 else int(row[3]),
+                }
+                for row in cur.fetchall()
+            ]
+    return {"indication": name, "molecules": _molecules_by_indication[cache_key]}
 
 
 @app.post("/predict")
