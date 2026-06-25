@@ -266,7 +266,7 @@ def list_indications():
 def get_targets_for_indication(name: str):
     """Protein targets known to be acted upon by drugs for this indication.
 
-    Walks: drug_indication → mechanism (drug-target action) → target_dictionary.
+    Walks: drug_indication → drug_mechanism (drug-target action) → target_dictionary.
     Filtered to human single proteins, protein complexes, or protein families
     (skip non-protein targets like cell lines, organisms, RNA, etc.).
     """
@@ -276,7 +276,7 @@ def get_targets_for_indication(name: str):
                 SELECT td.chembl_id, td.pref_name, td.target_type, td.organism,
                        COUNT(DISTINCT m.molregno) AS n_drugs
                 FROM drug_indication di
-                JOIN mechanism        m  ON di.molregno = m.molregno
+                JOIN drug_mechanism   m  ON di.molregno = m.molregno
                 JOIN target_dictionary td ON m.tid       = td.tid
                 WHERE di.mesh_heading = ?
                   AND td.target_type IN ('SINGLE PROTEIN', 'PROTEIN COMPLEX', 'PROTEIN FAMILY')
